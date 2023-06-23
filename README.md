@@ -1,3 +1,5 @@
+[jdlcdl was here to create a pull request that includes this line and the hyphens underneath.]
+----------------------------------------------------------------------------------------------
 # Build an offline, airgapped Bitcoin signing device for less than $50!
 
 ![Image of SeedSigners in Open Pill Enclosures](docs/img/Open_Pill_Star.JPG)![Image of SeedSigner in an Orange Pill enclosure](docs/img/Orange_Pill.JPG)
