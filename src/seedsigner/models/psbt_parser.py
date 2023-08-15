@@ -1,12 +1,12 @@
 from binascii import hexlify
-from embit import psbt, script, ec, bip32, bip39
+from embit import psbt, script, ec, bip32
 from embit.descriptor import Descriptor
 from embit.networks import NETWORKS
 from embit.psbt import PSBT
 from io import BytesIO
 from typing import List
 
-from seedsigner.models import Seed
+from seedsigner.models.seed import Seed
 from seedsigner.models.settings import SettingsConstants
 
 
@@ -148,7 +148,7 @@ class PSBTParser():
                         leaf_hashes, derivation = list(out.taproot_bip32_derivations.values())[0]
                         der = derivation.derivation
                         my_pubkey = self.root.derive(der)
-                    sc = script.p2tr(my_pubkey)
+                        sc = script.p2tr(my_pubkey)
 
                     if sc.data == self.psbt.tx.vout[i].script_pubkey.data:
                         is_change = True
