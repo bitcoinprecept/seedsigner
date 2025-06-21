@@ -19,6 +19,7 @@ from seedsigner.models.settings_definition import SettingsConstants
 # TODO: PR these directly into `embit`? Or replace with new/existing methods already in `embit`?
 
 
+# TODO: Refactor `wallet_type` to conform to our `sig_type` naming convention
 def get_standard_derivation_path(network: str = SettingsConstants.MAINNET, wallet_type: str = SettingsConstants.SINGLE_SIG, script_type: str = SettingsConstants.NATIVE_SEGWIT) -> str:
     if network == SettingsConstants.MAINNET:
         network_path = "0'"
@@ -30,22 +31,26 @@ def get_standard_derivation_path(network: str = SettingsConstants.MAINNET, walle
         raise Exception("Unexpected network")
 
     if wallet_type == SettingsConstants.SINGLE_SIG:
-        if script_type == SettingsConstants.NATIVE_SEGWIT:
-            return f"m/84'/{network_path}/0'"
+        if script_type == SettingsConstants.LEGACY_P2PKH:
+            return f"m/44'/{network_path}/0'"
         elif script_type == SettingsConstants.NESTED_SEGWIT:
             return f"m/49'/{network_path}/0'"
+        elif script_type == SettingsConstants.NATIVE_SEGWIT:
+            return f"m/84'/{network_path}/0'"
         elif script_type == SettingsConstants.TAPROOT:
             return f"m/86'/{network_path}/0'"
         else:
             raise Exception("Unexpected script type")
 
     elif wallet_type == SettingsConstants.MULTISIG:
-        if script_type == SettingsConstants.NATIVE_SEGWIT:
-            return f"m/48'/{network_path}/0'/2'"
+        if script_type == SettingsConstants.LEGACY_P2PKH:
+            return f"m/45'" #BIP45
         elif script_type == SettingsConstants.NESTED_SEGWIT:
             return f"m/48'/{network_path}/0'/1'"
+        elif script_type == SettingsConstants.NATIVE_SEGWIT:
+            return f"m/48'/{network_path}/0'/2'"
         elif script_type == SettingsConstants.TAPROOT:
-            raise Exception("Taproot multisig/musig not yet supported")
+            raise Exception("Taproot multisig not yet supported")
         else:
             raise Exception("Unexpected script type")
     else:
@@ -67,14 +72,14 @@ def get_single_sig_address(xpub: HDKey, script_type: str = SettingsConstants.NAT
     else:
         pubkey = xpub.derive([0,index]).key
 
-    if script_type == SettingsConstants.NATIVE_SEGWIT:
-        return embit.script.p2wpkh(pubkey).address(network=NETWORKS[embit_network])
+    if script_type == SettingsConstants.LEGACY_P2PKH:
+        return embit.script.p2pkh(pubkey).address(network=NETWORKS[embit_network])
 
     elif script_type == SettingsConstants.NESTED_SEGWIT:
         return embit.script.p2sh(embit.script.p2wpkh(pubkey)).address(network=NETWORKS[embit_network])
 
-    elif script_type == SettingsConstants.LEGACY_P2PKH:
-        return embit.script.p2pkh(pubkey).address(network=NETWORKS[embit_network])
+    elif script_type == SettingsConstants.NATIVE_SEGWIT:
+        return embit.script.p2wpkh(pubkey).address(network=NETWORKS[embit_network])
 
     elif script_type == SettingsConstants.TAPROOT:
         return embit.script.p2tr(pubkey).address(network=NETWORKS[embit_network])
@@ -87,17 +92,15 @@ def get_multisig_address(descriptor: Descriptor, index: int = 0, is_change: bool
     else:
         branch_index = 0
 
-    if descriptor.is_segwit:
-        # Could be native segwit or nested segwit (descriptor.is_wrapped)
+    # Can derive p2wsh, p2sh-p2wsh, and legacy (non-segwit) p2sh
+    if descriptor.is_segwit or (descriptor.is_legacy and descriptor.is_basic_multisig):
         return descriptor.derive(index, branch_index=branch_index).script_pubkey().address(network=NETWORKS[embit_network])
-
-    elif descriptor.is_legacy:
-        # TODO: Not yet implemented!
-        raise Exception("Legacy P2PKH verification not yet implemented!")
 
     elif descriptor.is_taproot:
         # TODO: Not yet implemented!
         raise Exception("Taproot verification not yet implemented!")
+
+    raise Exception(f"{descriptor.script_pubkey().script_type()} address verification not yet implemented!")
 
 
 
@@ -131,8 +134,9 @@ def parse_derivation_path(derivation_path: str) -> dict:
 
     lookups = {
         "script_types": {
-            "84h": SettingsConstants.NATIVE_SEGWIT,
+            "44h": SettingsConstants.LEGACY_P2PKH,
             "49h": SettingsConstants.NESTED_SEGWIT,
+            "84h": SettingsConstants.NATIVE_SEGWIT,
             "86h": SettingsConstants.TAPROOT,
         },
         "networks": {
@@ -146,8 +150,24 @@ def parse_derivation_path(derivation_path: str) -> dict:
     if not details["script_type"]:
         details["script_type"] = SettingsConstants.CUSTOM_DERIVATION
     details["network"] = lookups["networks"].get(sections[2])
-    details["is_change"] = sections[-2] == "1"
-    details["index"] = int(sections[-1])
+
+    # Check if there's a standard change path
+    if sections[-2] in ["0", "1"]:
+        details["is_change"] = sections[-2] == "1"
+    else:
+        details["is_change"] = None
+
+    # Check if there's a standard address index
+    if sections[-1].isdigit():
+        details["index"] = int(sections[-1])
+    else:
+        details["index"] = None
+
+    if details["is_change"] is not None and details["index"] is not None:
+        # standard change and addr index; safe to truncate to the wallet level
+        details["wallet_derivation_path"] = "/".join(sections[:-2])
+    else:
+        details["wallet_derivation_path"] = None
 
     details["clean_match"] = True
     for k, v in details.items():

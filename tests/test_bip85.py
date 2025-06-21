@@ -1,10 +1,4 @@
-import pytest
-from mock import MagicMock
 from seedsigner.models.seed import Seed
-from embit import bip39
-
-from seedsigner.models.settings import SettingsConstants
-
 
 
 def test_derive_child_mnemonic():

@@ -1,11 +1,16 @@
+import gettext
+import logging
 import json
 import os
+import pathlib
 import platform
 
 from typing import List
 
 from seedsigner.models.settings_definition import SettingsConstants, SettingsDefinition
 from seedsigner.models.singleton import Singleton
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidSettingsQRData(Exception):
@@ -32,6 +37,19 @@ class Settings(Singleton):
             if os.path.exists(Settings.SETTINGS_FILENAME):
                 with open(Settings.SETTINGS_FILENAME) as settings_file:
                     settings.update(json.load(settings_file))
+
+            # Setup multilanguage support
+            path = os.path.join(
+                pathlib.Path(__file__).parent.resolve().parent.resolve(),
+                "resources",
+                "seedsigner-translations",
+                "l10n"
+            )
+            gettext.bindtextdomain('messages', localedir=path)
+            gettext.textdomain('messages')
+
+            # Load default/persistent locale setting
+            settings.load_locale()
 
         return cls._instance
 
@@ -77,7 +95,7 @@ class Settings(Singleton):
             # Replace abbreviated name with full attr_name
             settings_entry = SettingsDefinition.get_settings_entry_by_abbreviated_name(abbreviated_name)
             if not settings_entry:
-                print(f"Ignoring unrecognized attribute: {abbreviated_name}")
+                logger.info(f"Ignoring unrecognized attribute: {abbreviated_name}")
                 continue
 
             # Validate value(s) against SettingsDefinition's valid options
@@ -87,6 +105,12 @@ class Settings(Singleton):
                 values = value
             for v in values:
                 if v not in [opt[0] for opt in settings_entry.selection_options]:
+                    if settings_entry.attr_name == SettingsConstants.SETTING__PERSISTENT_SETTINGS and v == SettingsConstants.OPTION__ENABLED:
+                        # Special case: trying to enable Persistent Settings when 
+                        # DISABLED is the only option allowed (because the SD card is not
+                        # inserted. Explicitly set to DISABLED.
+                        value = SettingsConstants.OPTION__DISABLED
+                        break
                     raise InvalidSettingsQRData(f"""{abbreviated_name} = '{v}' is not valid""")
 
             updated_settings[settings_entry.attr_name] = value
@@ -99,7 +123,8 @@ class Settings(Singleton):
     
 
     def save(self):
-        if self._data[SettingsConstants.SETTING__PERSISTENT_SETTINGS] == SettingsConstants.OPTION__ENABLED:
+        from seedsigner.hardware.microsd import MicroSD
+        if self._data[SettingsConstants.SETTING__PERSISTENT_SETTINGS] == SettingsConstants.OPTION__ENABLED and MicroSD.get_instance().is_inserted:
             with open(Settings.SETTINGS_FILENAME, 'w') as settings_file:
                 json.dump(self._data, settings_file, indent=4)
                 # SeedSignerOS makes removing the microsd possible, flush and then fsync forces persistent settings to disk
@@ -132,11 +157,8 @@ class Settings(Singleton):
                         # Break comma-separated SettingsQR input into List
                         new_settings[entry.attr_name] = new_settings[entry.attr_name].split(",")
 
-        # Can't just merge the _data dict; have to replace keys they have in common
-        #   (otherwise list values will be merged instead of replaced).
         for key, value in new_settings.items():
-            self._data.pop(key, None)
-            self._data[key] = value
+            self.set_value(key, value)
 
 
     def set_value(self, attr_name: str, value: any):
@@ -146,7 +168,9 @@ class Settings(Singleton):
             Note that for multiselect, the value must be a List.
         """
         if attr_name not in self._data:
-            raise Exception(f"Setting for {attr_name} not found")
+            # Outdated settings
+            print(f"Setting {attr_name} not recognized. Ignoring.")
+            return
 
         if SettingsDefinition.get_settings_entry(attr_name).type == SettingsConstants.TYPE__MULTISELECT:
             if type(value) != list:
@@ -156,21 +180,28 @@ class Settings(Singleton):
         if attr_name == SettingsConstants.SETTING__PERSISTENT_SETTINGS and value == SettingsConstants.OPTION__DISABLED:
             try:
                 os.remove(self.SETTINGS_FILENAME)
-                print(f"Removed {self.SETTINGS_FILENAME}")
+                logger.info(f"Removed {self.SETTINGS_FILENAME}")
             except:
-                print(f"{self.SETTINGS_FILENAME} not found to be removed")
+                logger.info(f"{self.SETTINGS_FILENAME} not found to be removed")
                 
         self._data[attr_name] = value
         self.save()
-    
 
-    def get_value(self, attr_name: str):
+        # Special handling for localization
+        if attr_name == SettingsConstants.SETTING__LOCALE:
+            self.load_locale()
+
+
+    def get_value(self, attr_name: str, default_if_none: bool = None):
         """
             Returns the attr's current value.
 
             Note that for multiselect, the current value is a List.
         """
         if attr_name not in self._data:
+            if default_if_none:
+                return SettingsDefinition.get_settings_entry(attr_name).default_value
+
             raise Exception(f"Setting for {attr_name} not found")
         return self._data[attr_name]
 
@@ -213,6 +244,14 @@ class Settings(Singleton):
         return display_names
 
 
+    def load_locale(self):
+        locale = self.get_value(SettingsConstants.SETTING__LOCALE)
+        os.environ['LANGUAGE'] = locale
+
+        # Re-initialize with the new locale
+        print(f"Set LANGUAGE locale to {os.environ['LANGUAGE']}")
+
+
 
     """
         Intentionally keeping the properties very limited to avoid an expectation of
@@ -220,35 +259,46 @@ class Settings(Singleton):
 
         It's more cumbersome, but instead use:
 
-        settings.get_value(SettingsConstants.SETTING__MY_SETTING_ATTR)
+        Settings.get_instance().get_value(SettingsConstants.SETTING__MY_SETTING_ATTR)
     """
     @property
     def debug(self) -> bool:
         return self._data[SettingsConstants.SETTING__DEBUG] == SettingsConstants.OPTION__ENABLED
 
 
-    def microsd_handler(action):
+    def handle_microsd_state_change(action: str):
+        """
+        Enables/Disables the Persistent Settings option based on the MicroSD card state.
+        """
         from seedsigner.hardware.microsd import MicroSD
-        
+
         if Settings.HOSTNAME == Settings.SEEDSIGNER_OS:
-        
             if action == MicroSD.ACTION__INSERTED:
-                # restore persistent settings back to defaults
+                # SD card was just inserted.
+                # Restore persistent settings back to defaults
                 entry = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__PERSISTENT_SETTINGS)
                 entry.selection_options = SettingsConstants.OPTIONS__ENABLED_DISABLED
-                entry.help_text = "Store Settings on SD card."
-                
+                entry.help_text = SettingsConstants.PERSISTENT_SETTINGS__SD_INSERTED__HELP_TEXT
+
+                # TODO: Perhaps prompt the user if the current settings (not including persistent
+                # settings) should overwrite the settings on disk, if they differ:
+                # - Overwrite settings on the SD?
+                # - Load settings from SD?
                 # if Settings file exists (meaning persistent settings was previously enabled), write out current settings to disk
                 if os.path.exists(Settings.SETTINGS_FILENAME):
                     # enable persistent settings first, then save
                     Settings.get_instance()._data[SettingsConstants.SETTING__PERSISTENT_SETTINGS] = SettingsConstants.OPTION__ENABLED
                     Settings.get_instance().save()
-                    
+
             elif action == MicroSD.ACTION__REMOVED:
-                # set persistent settings to disabled value directly
+                # SD card was just removed.
+                # Set persistent settings to disabled value directly
                 Settings.get_instance()._data[SettingsConstants.SETTING__PERSISTENT_SETTINGS] = SettingsConstants.OPTION__DISABLED
-                
+
                 # set persistent settings to only have disabled as an option, adding additional help text that microSD is removed
                 entry = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__PERSISTENT_SETTINGS)
                 entry.selection_options = SettingsConstants.OPTIONS__ONLY_DISABLED
-                entry.help_text = "MicroSD card is removed"
+                entry.help_text = SettingsConstants.PERSISTENT_SETTINGS__SD_REMOVED__HELP_TEXT
+            
+            else:
+                raise Exception(f"Invalid MicroSD action: {action}")

@@ -120,11 +120,14 @@ class DecodeQR:
             qr_str = data
 
         if self.qr_type in [QRType.PSBT__UR2, QRType.OUTPUT__UR, QRType.ACCOUNT__UR, QRType.BYTES__UR]:
-            self.decoder.receive_part(qr_str)
+            added_part = self.decoder.receive_part(qr_str)
             if self.decoder.is_complete():
                 self.complete = True
                 return DecodeQRStatus.COMPLETE
-            return DecodeQRStatus.PART_COMPLETE # segment added to ur2 decoder
+            if added_part:
+                return DecodeQRStatus.PART_COMPLETE
+            else:
+                return DecodeQRStatus.PART_EXISTING
 
         else:
             # All other formats use the same method signature
@@ -219,12 +222,12 @@ class DecodeQR:
                 return self.decoder.get_wallet_descriptor()
 
 
-    def get_percent_complete(self) -> int:
+    def get_percent_complete(self, weight_mixed_frames: bool = False) -> int:
         if not self.decoder:
             return 0
 
         if self.qr_type in [QRType.PSBT__UR2, QRType.OUTPUT__UR, QRType.ACCOUNT__UR, QRType.BYTES__UR]:
-            return int(self.decoder.estimated_percent_complete() * 100)
+            return int(self.decoder.estimated_percent_complete(weight_mixed_frames=weight_mixed_frames) * 100)
 
         elif self.qr_type in [QRType.PSBT__SPECTER]:
             if self.decoder.total_segments == None:
@@ -260,6 +263,7 @@ class DecodeQR:
             QRType.PSBT__BASE64,
             QRType.PSBT__BASE43,
         ]
+
 
     @property
     def is_seed(self):
@@ -305,7 +309,7 @@ class DecodeQR:
 
 
     @staticmethod
-    def extract_qr_data(image, is_binary:bool = False) -> str:
+    def extract_qr_data(image, is_binary:bool = False) -> str | None:
         if image is None:
             return None
 
@@ -337,10 +341,10 @@ class DecodeQR:
             # PSBT
             if re.search("^UR:CRYPTO-PSBT/", s, re.IGNORECASE):
                 return QRType.PSBT__UR2
-                
+
             elif re.search("^UR:CRYPTO-OUTPUT/", s, re.IGNORECASE):
                 return QRType.OUTPUT__UR
-                
+
             elif re.search("^UR:CRYPTO-ACCOUNT/", s, re.IGNORECASE):
                 return QRType.ACCOUNT__UR
 
@@ -362,10 +366,10 @@ class DecodeQR:
             elif re.search(r'^\{\"label\".*\"descriptor\"\:.*', desc_str, re.IGNORECASE):
                 # if json starting with label and contains descriptor, assume specter wallet json
                 return QRType.WALLET__SPECTER
-            
+
             elif "multisig setup file" in s.lower():
                 return QRType.WALLET__CONFIGFILE
-            
+
             elif "sortedmulti" in s:
                 return QRType.WALLET__GENERIC
 
@@ -378,7 +382,7 @@ class DecodeQR:
                 return QRType.BITCOIN_ADDRESS
 
             # message signing
-            elif DecodeQR.is_sign_message(s):
+            elif s.startswith("signmessage"):
                 return QRType.SIGN_MESSAGE
 
             # config data
@@ -392,7 +396,7 @@ class DecodeQR:
                 _4LETTER_WORDLIST = [word[:4].strip() for word in wordlist]
             except:
                 _4LETTER_WORDLIST = []
-            
+
             if all(x in wordlist for x in s.strip().split(" ")):
                 # checks if all words in list are in bip39 word list
                 return QRType.SEED__MNEMONIC
@@ -408,8 +412,16 @@ class DecodeQR:
             # Probably this isn't meant to be string data; check if it's valid byte data
             # below.
             pass
-        
+
         # Is it byte data?
+        if not isinstance(s, bytes):
+            try:
+                # TODO: remove this check & conversion once above cast to str is removed
+                s = s.encode()
+            except UnicodeError:
+                # Couldn't convert back to bytes; shouldn't happen
+                raise Exception("Conversion to bytes failed")
+
         # 32 bytes for 24-word CompactSeedQR; 16 bytes for 12-word CompactSeedQR
         if len(s) == 32 or len(s) == 16:
             try:
@@ -495,16 +507,10 @@ class DecodeQR:
     def is_bitcoin_address(s):
         if re.search(r'^bitcoin\:.*', s, re.IGNORECASE):
             return True
-        elif re.search(r'^((bc1|tb1|bcr|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,62})$', s):
-            # TODO: Handle regtest bcrt?
+        elif re.search(r'^((bc1|tb1|bcr|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,62})$', s, re.IGNORECASE):
             return True
         else:
             return False
-
-
-    @staticmethod
-    def is_sign_message(s):
-        return type(s) == str and s.startswith("signmessage")
 
 
     @staticmethod
@@ -908,7 +914,7 @@ class SignMessageQrDecoder(BaseSingleFrameQrDecoder):
 
         # TODO: support formats other than ascii?
         if fmt != "ascii":
-            print(f"Sign message: Unsupported format: {fmt}")
+            logger.info(f"Sign message: Unsupported format: {fmt}")
             return DecodeQRStatus.INVALID
 
         self.complete = True
@@ -933,60 +939,72 @@ class BitcoinAddressQrDecoder(BaseSingleFrameQrDecoder):
 
 
     def add(self, segment, qr_type=QRType.BITCOIN_ADDRESS):
-        r = re.search(r'((bc1q|tb1q|bcrt1q|bc1p|tb1p|bcrt1p|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,64})', segment)
-        if r != None:
-            self.address = r.group(1)
-        
-            if re.search(r'^((bc1q|tb1q|bcrt1q|bc1p|tb1p|bcrt1p|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,64})$', self.address) != None:
-                self.complete = True
-                self.collected_segments = 1
-                
-                # get address type
-                r = re.search(r'^((bc1q|tb1q|bcrt1q|bc1p|tb1p|bcrt1p|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,64})$', self.address)
-                if r != None:
-                    r = r.group(2)
-                
-                if r == "1":
-                    # Legacy P2PKH. mainnet
-                    self.address_type = (SettingsConstants.LEGACY_P2PKH, SettingsConstants.MAINNET)
+        """
+            Input may be prefixed with "bitcoin:" but will be ignored.
 
-                elif r == "m" or r == "n":
-                    self.address_type = (SettingsConstants.LEGACY_P2PKH, SettingsConstants.TESTNET)
+            RegEx searches for a recognizable bitcoin address.
+                * The `^` ensures that the specified address prefixes can only match at
+                    the beginning of the address.
 
-                elif r == "3":
-                    # Nested Segwit Single Sig (P2WPKH in P2SH) or Multisig (P2WSH in P2SH); mainnet
-                    self.address_type = (SettingsConstants.NESTED_SEGWIT, SettingsConstants.MAINNET)
+            Result will yield the following match groups:
+                * group 1: complete address
+                * group 2: address prefix
+        """
+        address_match = re.search(r'^((bc1q|tb1q|bcrt1q|bc1p|tb1p|bcrt1p|[123]|[mn])[a-zA-HJ-NP-Z0-9]{25,64})', segment.split(":")[-1], re.IGNORECASE)
+        if address_match != None:
+            self.address = address_match.group(1)
+            self.complete = True
+            self.collected_segments = 1
+            
+            # Have to handle wallets that uppercase bech32 addresses.
+            # Note that it's safe to lowercase the prefix for ALL addr formats.
+            addr_prefix = address_match.group(2).lower()
+            
+            if addr_prefix == "1":
+                # Legacy P2PKH. mainnet
+                self.address_type = (SettingsConstants.LEGACY_P2PKH, SettingsConstants.MAINNET)
 
-                elif r == "2":
-                    # Nested Segwit Single Sig (P2WPKH in P2SH) or Multisig (P2WSH in P2SH); testnet
-                    self.address_type = (SettingsConstants.NESTED_SEGWIT, SettingsConstants.TESTNET)
+            elif addr_prefix in ["m", "n"]:
+                self.address_type = (SettingsConstants.LEGACY_P2PKH, SettingsConstants.TESTNET)
 
-                elif r == "bc1q":
-                    # Native Segwit (single sig or multisig), mainnet 
-                    self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.MAINNET)
+            elif addr_prefix == "3":
+                # Nested segwit single sig (p2sh-p2wpkh), nested segwit multisig (p2sh-p2wsh), or legacy multisig (p2sh); mainnet
+                # TODO: Would be more correct to use a P2SH constant
+                self.address_type = (SettingsConstants.NESTED_SEGWIT, SettingsConstants.MAINNET)
 
-                elif r == "tb1q":
-                    # Native Segwit (single sig or multisig), testnet
-                    self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.TESTNET)
+            elif addr_prefix == "2":
+                # Nested segwit single sig (p2sh-p2wpkh), nested segwit multisig (p2sh-p2wsh), or legacy multisig (p2sh); testnet / regtest
+                self.address_type = (SettingsConstants.NESTED_SEGWIT, SettingsConstants.TESTNET)
 
-                elif r == "bcrt1q":
-                    # Native Segwit (single sig or multisig), regtest
-                    self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.REGTEST)
+            elif addr_prefix == "bc1q":
+                # Native Segwit (single sig or multisig), mainnet 
+                self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.MAINNET)
 
-                elif r == "bc1p":
-                    # Native Segwit (single sig or multisig), mainnet 
-                    self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.MAINNET)
+            elif addr_prefix == "tb1q":
+                # Native Segwit (single sig or multisig), testnet
+                self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.TESTNET)
 
-                elif r == "tb1p":
-                    # Native Segwit (single sig or multisig), testnet
-                    self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.TESTNET)
+            elif addr_prefix == "bcrt1q":
+                # Native Segwit (single sig or multisig), regtest
+                self.address_type = (SettingsConstants.NATIVE_SEGWIT, SettingsConstants.REGTEST)
 
-                elif r == "bcrt1p":
-                    # Native Segwit (single sig or multisig), regtest
-                    self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.REGTEST)
-                
-                return DecodeQRStatus.COMPLETE
+            elif addr_prefix == "bc1p":
+                self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.MAINNET)
 
+            elif addr_prefix == "tb1p":
+                self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.TESTNET)
+
+            elif addr_prefix == "bcrt1p":
+                self.address_type = (SettingsConstants.TAPROOT, SettingsConstants.REGTEST)
+            # Note: there is no final "else" here because the regex won't return any other matches.
+
+            # If the addr type is case-insensitive, ensure we return it lowercase
+            if self.address_type[0] in [SettingsConstants.NATIVE_SEGWIT, SettingsConstants.TAPROOT]:
+                self.address = self.address.lower()
+
+            return DecodeQRStatus.COMPLETE
+
+        logger.debug(f"Invalid address: {segment}")
         return DecodeQRStatus.INVALID
 
 
@@ -1078,7 +1096,7 @@ class GenericWalletQrDecoder(BaseSingleFrameQrDecoder):
             self.complete = True
             return DecodeQRStatus.COMPLETE
         except Exception as e:
-            print(repr(e))
+            logger.info(repr(e), exc_info=True)
         return DecodeQRStatus.INVALID
     
 

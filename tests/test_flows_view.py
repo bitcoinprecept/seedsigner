@@ -1,4 +1,4 @@
-from mock import patch
+from unittest.mock import patch
 
 # Must import test base before the Controller
 from base import FlowTest, FlowStep
@@ -22,20 +22,12 @@ class TestViewFlows(FlowTest):
                 FlowStep(PowerOptionsView, button_data_selection=PowerOptionsView.RESET),
                 FlowStep(RestartView),
             ])
-        
+
 
     def test_power_off_flow(self):
         """
         Basic flow from MainMenuView to PowerOffView
         """
-        with patch('seedsigner.views.view.PowerOffView.PowerOffThread'):
-            self.run_sequence([
-                FlowStep(MainMenuView, screen_return_value=RET_CODE__POWER_BUTTON),
-                FlowStep(PowerOptionsView, button_data_selection=PowerOptionsView.POWER_OFF),
-                FlowStep(PowerOffView),
-            ])
-        
-        # And again, but this time as if we were in the SeedSigner OS
         Settings.HOSTNAME = Settings.SEEDSIGNER_OS
         self.run_sequence([
             FlowStep(MainMenuView, screen_return_value=RET_CODE__POWER_BUTTON),
@@ -43,7 +35,7 @@ class TestViewFlows(FlowTest):
             FlowStep(PowerOffView),  # returns BackStackView
             FlowStep(PowerOptionsView),
         ])
-    
+
 
     def test_not_yet_implemented_flow(self):
         """
@@ -59,7 +51,7 @@ class TestViewFlows(FlowTest):
             FlowStep(NotYetImplementedView),
             FlowStep(MainMenuView),
         ])
-    
+
 
     def test_unhandled_exception_flow(self):
         """

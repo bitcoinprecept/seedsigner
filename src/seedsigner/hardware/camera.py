@@ -1,6 +1,5 @@
 import io
 
-from picamera import PiCamera
 from PIL import Image
 from seedsigner.hardware.pivideostream import PiVideoStream
 from seedsigner.models.settings import Settings, SettingsConstants
@@ -23,6 +22,7 @@ class Camera(Singleton):
 
 
     def start_video_stream_mode(self, resolution=(512, 384), framerate=12, format="bgr"):
+        from seedsigner.hardware.pivideostream import PiVideoStream
         if self._video_stream is not None:
             self.stop_video_stream_mode()
 
@@ -38,7 +38,7 @@ class Camera(Singleton):
             return frame
         else:
             if frame is not None:
-                return Image.fromarray(frame.astype('uint8'), 'RGB').rotate(90 + self._camera_rotation)
+                return Image.fromarray(frame.astype('uint8'), 'RGB').convert('RGBA').rotate(90 + self._camera_rotation)
         return None
 
 
@@ -49,6 +49,7 @@ class Camera(Singleton):
 
 
     def start_single_frame_mode(self, resolution=(720, 480)):
+        from picamera import PiCamera
         if self._video_stream is not None:
             self.stop_video_stream_mode()
         if self._picamera is not None:
